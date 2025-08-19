@@ -8,6 +8,7 @@
 #include "bh1750.h"
 #include "ssd1306.h"
 #include "font.h"
+#include "pico/bootrom.h"
 
 #define I2C_PORT i2c0
 #define SDA_PIN 0
@@ -19,6 +20,10 @@
 #define I2C_SCL_DISP 15
 #define endereco 0x3C
 
+//Definição dos botões
+#define buttonA 5  // Botão A 
+#define buttonB  6  // Botão B
+
 // --- INÍCIO DAS VARIÁVEIS GLOBAIS ---
 // Objeto do display se torna global para ser acessado por múltiplas funções
 ssd1306_t ssd;
@@ -28,7 +33,55 @@ char g_estado_sistema[20] = "Inicializando...";
 char g_cor_detectada[20] = "-";
 uint8_t g_r = 0, g_g = 0, g_b = 0;
 uint16_t g_lux = 0;
+
+//tamanho real do array
+#define PALETTE_SIZE (sizeof(COLOR_PALETTE)/sizeof(COLOR_PALETTE[0]))
+
+// paleta de cores
+static const uint32_t COLOR_PALETTE[] = {
+    0x00550000, // Vermelho
+    0x55000000, // Verde
+    0x00005500, // Azul
+    0x55550000, // Amarelo (Vermelho + Verde)
+    0x00555500, // Roxo (Vermelho + Azul)
+    0x55005500, // Ciano (Verde + Azul)
+};
+
+static volatile uint8_t  g_color_index     = 0;
+static volatile uint32_t current_color_hex = 0x00550000; // começa vermelho
 // --- FIM DAS VARIÁVEIS GLOBAIS ---
+
+//função da interrupção callback
+void debounce(uint gpio, uint32_t events)
+{
+    static uint32_t last_time = 0;
+    uint32_t current_time = to_us_since_boot(get_absolute_time());
+
+    if (current_time - last_time > 200000)
+    {
+        last_time = current_time;
+
+        // Botão A - controla cor dos LEDs 
+        if (gpio == buttonA)
+        {               
+            g_color_index = (g_color_index + 1) % PALETTE_SIZE; // proximo index 
+            current_color_hex = COLOR_PALETTE[g_color_index]; // seleciona a proxima cor e armazena
+            printf("Botao A pressionado: cor %d = %08X\n",g_color_index,current_color_hex);
+        }
+
+        if (gpio == buttonB)
+        {
+            reset_usb_boot(0, 0);  // entra em modo BOOTSEL (UF2)
+        }
+    }
+}
+
+void buttons_init(uint button) {
+    // configura pinos de entrada com pull-up
+    gpio_init(button);
+    gpio_set_dir(button, GPIO_IN);
+    gpio_pull_up(button);
+}
 
 void setupDisplay() {
     // I2C do Display
@@ -151,6 +204,14 @@ int main() {
 
     // Configura o display
     setupDisplay();
+
+     //inicia os botões
+    buttons_init(buttonA);
+    buttons_init(buttonB);
+
+    // cria interrupção para botão A e B
+    gpio_set_irq_enabled_with_callback(buttonB, GPIO_IRQ_EDGE_FALL, true, &debounce);
+    gpio_set_irq_enabled(buttonA, GPIO_IRQ_EDGE_FALL, true);
 
     while (true) {
         uint8_t r, g, b;
