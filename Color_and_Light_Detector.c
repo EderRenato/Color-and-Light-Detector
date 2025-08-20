@@ -9,10 +9,20 @@
 #include "ssd1306.h"
 #include "font.h"
 #include "pico/bootrom.h"
+#include "pico/binary_info.h"
+#include "hardware/clocks.h"
+#include "hardware/pio.h"
+#include "ws2818b.pio.h"
 
+// Definições gerais
 #define I2C_PORT i2c0
 #define SDA_PIN 0
 #define SCL_PIN 1
+#define RED_PIN 13
+#define BLUE_PIN 12
+#define GREEN_PIN 11
+#define LED_COUNT 25
+#define LED_PIN 7
 
 // Display na I2C
 #define I2C_PORT_DISP i2c1
@@ -24,6 +34,28 @@
 #define buttonA 5  // Botão A 
 #define buttonB  6  // Botão B
 
+// Definições para matriz de LED
+typedef enum {
+    NIVEL_0, 
+    NIVEL_1, 
+    NIVEL_2, 
+    NIVEL_3, 
+    NIVEL_4, 
+    NIVEL_5  
+} LuminosityState;
+
+// Definição da estrutura do pixel
+struct pixel_t {
+    uint8_t G, R, B;
+};
+typedef struct pixel_t pixel_t;
+typedef pixel_t npLED_t;
+
+// Confiugarações das máquinas de estados do PIO
+npLED_t leds[LED_COUNT];
+PIO np_pio;
+uint sm;
+
 // --- INÍCIO DAS VARIÁVEIS GLOBAIS ---
 // Objeto do display se torna global para ser acessado por múltiplas funções
 ssd1306_t ssd;
@@ -33,6 +65,7 @@ char g_estado_sistema[20] = "Inicializando...";
 char g_cor_detectada[20] = "-";
 uint8_t g_r = 0, g_g = 0, g_b = 0;
 uint16_t g_lux = 0;
+int digit = 0;
 
 //tamanho real do array
 #define PALETTE_SIZE (sizeof(COLOR_PALETTE)/sizeof(COLOR_PALETTE[0]))
@@ -42,14 +75,66 @@ static const uint32_t COLOR_PALETTE[] = {
     0x00550000, // Vermelho
     0x55000000, // Verde
     0x00005500, // Azul
-    0x55550000, // Amarelo (Vermelho + Verde)
-    0x00555500, // Roxo (Vermelho + Azul)
-    0x55005500, // Ciano (Verde + Azul)
 };
 
 static volatile uint8_t  g_color_index     = 0;
 static volatile uint32_t current_color_hex = 0x00550000; // começa vermelho
+volatile int state = 0; // estado inicial
+
 // --- FIM DAS VARIÁVEIS GLOBAIS ---
+
+// Matrizes para cada dígito 
+const uint8_t states[6][5][5][3] = {
+    // 0
+    {
+        {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}}, 
+        {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},    
+        {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},    
+        {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},    
+        {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}}  
+    },
+    // 1
+    {
+        {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+        {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+        {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+        {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+        {{0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}}
+    },
+    // 2
+    {
+        {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+        {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+        {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+        {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+        {{0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}},
+        {{0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}} 
+    },
+    // 3
+    {
+        {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+        {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+        {{0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}},   
+        {{0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}},
+        {{0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}} 
+    },
+    // 4
+    {
+        {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+        {{0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}},
+        {{0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}},
+        {{0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}},
+        {{0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}} 
+    },
+    // 5
+    {
+        {{0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}},
+        {{0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}},
+        {{0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}},   
+        {{0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}},
+        {{0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0}} 
+    },
+};
 
 //função da interrupção callback
 void debounce(uint gpio, uint32_t events)
@@ -81,6 +166,112 @@ void buttons_init(uint button) {
     gpio_init(button);
     gpio_set_dir(button, GPIO_IN);
     gpio_pull_up(button);
+}
+
+// Inicializa os LEDs RGB
+void init_rgb() {
+    // Inicializa e configura o pino VERMELHO como saída
+    gpio_init(RED_PIN);
+    gpio_set_dir(RED_PIN, GPIO_OUT);
+
+    // Inicializa e configura o pino VERDE como saída
+    gpio_init(GREEN_PIN);
+    gpio_set_dir(GREEN_PIN, GPIO_OUT);
+
+    // Inicializa e configura o pino AZUL como saída
+    gpio_init(BLUE_PIN);
+    gpio_set_dir(BLUE_PIN, GPIO_OUT);
+}
+
+// Recebe o valor em hexa e controla o RGB
+void set_rgb_led_digital(uint32_t color_hex) {
+    // Extrai os componentes de cor do valor hexadecimal
+    uint8_t g = (color_hex >> 24) & 0xFF;
+    uint8_t r = (color_hex >> 16) & 0xFF;
+    uint8_t b = (color_hex >> 8)  & 0xFF;
+
+    // Aciona os pinos. Se o valor da cor (r, g, ou b) for maior que 0,
+    // a expressão se torna 'true', ligando o pino. Se for 0, se torna 'false1.
+    gpio_put(RED_PIN,   r > 0);
+    gpio_put(GREEN_PIN, g > 0);
+    gpio_put(BLUE_PIN,  b > 0);
+}
+
+// Inicialização da matriz de LEDs
+void npInit(uint pin) {
+    uint offset = pio_add_program(pio0, &ws2818b_program);
+    np_pio = pio0;
+    sm = pio_claim_unused_sm(np_pio, true);
+    ws2818b_program_init(np_pio, sm, offset, pin, 800000.f);
+}
+
+// Função para configurar o LED na matriz de LEDs
+void npSetLED(uint index, uint8_t r, uint8_t g, uint8_t b) {
+    leds[index].R = r;
+    leds[index].G = g;
+    leds[index].B = b;
+}
+
+// Função para escrever os dados na matriz de LEDs
+void npWrite() {
+    for (uint i = 0; i < LED_COUNT; i++) {
+        pio_sm_put_blocking(np_pio, sm, leds[i].G);
+        pio_sm_put_blocking(np_pio, sm, leds[i].R);
+        pio_sm_put_blocking(np_pio, sm, leds[i].B);
+    }
+    sleep_us(100);
+}
+
+// Função para obter o índice do LED na matriz de LEDs
+int getIndex(int x, int y) {
+    if (y % 2 == 0) {
+        return 24 - (y * 5 + x);
+    } else {
+        return 24 - (y * 5 + (4 - x));
+    }
+}
+
+// Função responsável por exibir o dígito na matriz de LEDs
+void npDisplayDigit(int digit) {
+    for (int coluna = 0; coluna < 5; coluna++) {
+        for (int linha = 0; linha < 5; linha++) {
+            int posicao = getIndex(linha, coluna);
+            npSetLED(
+                posicao,
+                states[digit][coluna][linha][0],  // R
+                states[digit][coluna][linha][1],  // G
+                states[digit][coluna][linha][2]   // B
+            );
+        }
+    }
+    npWrite();
+}
+
+// Função para limpar a matriz de LEDs
+void npClear() {
+   digit = NIVEL_0;
+   npDisplayDigit(digit);
+}
+
+void update_luminosity_state(uint16_t luminosity) {
+    if (luminosity < 100) {
+        digit = NIVEL_0;
+    } 
+    else if (luminosity < 1000) { // Implicitamente >= 100
+        digit = NIVEL_1;
+    } 
+    else if (luminosity < 2000) { // Implicitamente >= 1000
+        digit = NIVEL_2;
+    } 
+    else if (luminosity < 3000) { // Implicitamente >= 2000
+        digit = NIVEL_3;
+    } 
+    else if (luminosity < 4000) { // Implicitamente >= 3000
+        digit = NIVEL_4;
+    } 
+    else { // Se chegou aqui, é porque a luminosidade é >= 4000
+        digit = NIVEL_5;
+    }
 }
 
 void setupDisplay() {
@@ -190,6 +381,7 @@ void process_and_play_tone(uint8_t r, uint8_t g, uint8_t b, uint16_t clear_val, 
 int main() {
     stdio_init_all();
     sleep_ms(2000);
+    npInit(LED_PIN);
 
     printf("Iniciando GY-33...\n");
     gy33_init(I2C_PORT, SDA_PIN, SCL_PIN);
@@ -201,6 +393,7 @@ int main() {
 
     init_buzzer_pwm(BUZZER_A);
     init_buzzer_pwm(BUZZER_B);
+    init_rgb();
 
     // Configura o display
     setupDisplay();
@@ -229,6 +422,10 @@ int main() {
 
         // Atualiza o display com os novos dados
         updateDisplay();
+
+        set_rgb_led_digital(current_color_hex);
+        update_luminosity_state(luminosity);
+        npDisplayDigit(digit);
         
         sleep_ms(500);
     }
