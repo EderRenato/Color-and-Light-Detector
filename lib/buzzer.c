@@ -13,7 +13,7 @@ void set_buzzer_tone(uint gpio, uint freq) {
     uint slice_num = pwm_gpio_to_slice_num(gpio);
     uint top = 1000000 / freq;            // Calcula o TOP para a frequência desejada
     pwm_set_wrap(slice_num, top);
-    pwm_set_chan_level(slice_num, pwm_gpio_to_channel(gpio), top / 2); // 50% duty cycle
+    pwm_set_chan_level(slice_num, pwm_gpio_to_channel(gpio), top / 98); 
 }
 
 void stop_buzzer(uint gpio) {
